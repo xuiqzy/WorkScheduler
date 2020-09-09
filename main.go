@@ -74,16 +74,14 @@ func main() {
 			// todo use concurrency here
 			for currentUUID, currentCommand := range commandStoreMap {
 				if isDeviceRunningOnBatteryPower() {
+					// go to beginning of outer for loop where we wait for computer to be plugged in
 					break
 				}
+				// TODO:
 				// parallelize this but take care that command is always removed from newly read or
 				// synchronized / used by all goroutines commandStore and not the initial one at the
 				// moment of the goroutine starting.....
 				runCommandWithArgumentsAndHandleErrors(currentCommand)
-
-				// ========== CONTINUE WORKING HERE ==========================
-				// make this remove use the uuid of the command, so we can parallelize command
-				// execution and removal in the list (if successful)
 
 				commandStore = removeCommandFromCommandStore(commandStoreMap, currentUUID)
 				marshalAndWriteCommandStore(commandStore)
