@@ -27,14 +27,21 @@ func main() {
 		} else {
 			fmt.Println("Info: No arguments specified for the command to run.")
 		}
-		fmt.Println("Adding the following command to the command store for later execution...:",
-			commandToExecuteAbsolutePath, "argument list:", commandArguments)
+		fmt.Println("Adding the following command to the command store for later execution...")
+		fmt.Printf("Absolute path: %q\n", commandToExecuteAbsolutePath)
 
-		err := addCommandToCommandStore(commandToExecuteAbsolutePath, commandArguments)
+		fmt.Print("Argument list: ")
+		for _, currentArgument := range commandArguments {
+			fmt.Printf("%q ", currentArgument)
+		}
+		fmt.Println()
+
+		newUUID, err := addCommandToCommandStore(commandToExecuteAbsolutePath, commandArguments)
 		if err != nil {
 			fmt.Println("Error when adding command to command store for later execution:", err)
 		} else {
-			fmt.Println("Successfully added command to command store. It will be executed later.")
+			fmt.Println("Successfully added with uuid:", newUUID)
+			fmt.Println("It will be executed later.")
 		}
 
 	} else {
@@ -48,7 +55,7 @@ func daemonMainLoop() {
 
 	for {
 
-		waitUntilPluggedIn()
+		waitUntilPowerPluggedIn()
 
 		fmt.Println("Checking command store for comands to be run...")
 		commandStore, err := readAndParseCommandStore()
@@ -86,7 +93,7 @@ func daemonMainLoop() {
 			// respective current command and does not share one reference
 			go func(commandToRun CommandWithArguments) {
 				runRawCommandAndHandleErrors(commandToRun)
-				err = removeCommandFromCommandStore(commandToRun.UUID)
+				err := removeCommandFromCommandStore(commandToRun.UUID)
 				if err != nil {
 					fmt.Println("Error when removing command:", commandToRun)
 				}
@@ -100,38 +107,11 @@ func daemonMainLoop() {
 
 		// we ran all commands asynchronously (if any), wait a bit before checking again
 		// for new commands to be scheduled (even if we are still plugged into power)
-		secondsToSleep := 10
+		secondsToSleep := 30
 		fmt.Println("Sleeping for", secondsToSleep, "seconds...\n")
 		sleepForSeconds(secondsToSleep)
 
 	}
-}
-
-func waitUntilPluggedIn() {
-
-	// ignore error, just use the returned true as fallback, we will check again later
-	for runningOnBattery, _ := isDeviceRunningOnBatteryPower(); runningOnBattery; {
-		numberOfSecondsToWait := 2
-		fmt.Println("Running only on battery power, waiting for", numberOfSecondsToWait, "seconds")
-		sleepForSeconds(numberOfSecondsToWait)
-	}
-
-	fmt.Println("External power is currently connected")
-
-}
-
-func sleepForSeconds(numberOfSecondsToSleep int) {
-	time.Sleep(multiplyDuration(numberOfSecondsToSleep, time.Second))
-}
-
-/*
-Hide semantically invalid duration math or seemingly unnecessary/illogical cast behind a function
-see https://stackoverflow.com/questions/17573190/how-to-multiply-duration-by-integer
-*/
-func multiplyDuration(factor int, duration time.Duration) time.Duration {
-	// converts duration to nanoseconds because multiplication only works with same types in go
-	// uses the new nanoseconds value to construct the new duration
-	return time.Duration(int64(factor) * int64(duration))
 }
 
 func runRawCommandAndHandleErrors(commandToRun CommandWithArguments) error {
@@ -140,9 +120,12 @@ func runRawCommandAndHandleErrors(commandToRun CommandWithArguments) error {
 	argumentList := commandToRun.CommandArguments
 	uuidOfCommand := commandToRun.UUID
 
-	changeStateOfCommand(uuidOfCommand, CommandRunning)
+	changeStateToRunningError := changeStateOfCommand(uuidOfCommand, CommandRunning)
+	if changeStateToRunningError != nil {
+		fmt.Println("Error when changing state of command", commandToRun, "error: ", changeStateToRunningError)
+	}
 
-	fmt.Println("Executing command", "`"+absolutePath+"`", "with arguments: ", argumentList, "and uuid:", uuidOfCommand)
+	fmt.Println("Executing command `"+absolutePath+"` with arguments: ", argumentList, "and uuid:", uuidOfCommand)
 
 	// todo: this works without an absolute path at the moment but maybe we should change that
 	// to prevent some PATH injection attacks
@@ -154,6 +137,7 @@ func runRawCommandAndHandleErrors(commandToRun CommandWithArguments) error {
 		fmt.Println("Error executing command and/or reading standard out and standard error of it:", err)
 		stateChangeError = changeStateOfCommand(uuidOfCommand, CommandFailed)
 	} else {
+		fmt.Println("Successfully executed command `"+absolutePath+"` with arguments: ", argumentList, "and uuid:", uuidOfCommand)
 		stateChangeError = changeStateOfCommand(uuidOfCommand, CommandSuccessful)
 	}
 
@@ -162,15 +146,33 @@ func runRawCommandAndHandleErrors(commandToRun CommandWithArguments) error {
 	}
 
 	// TODO log to system log or sth, just run as systemd unit
-	fmt.Println("======== Standard out and error of command ========")
+	fmt.Println()
+	fmt.Println("======== Standard out and error of command", commandToRun, "========")
 	fmt.Print(string(standardOutAndError))
 	fmt.Println("======== End of standard out and error ========")
+	fmt.Println()
 
 	return err
 }
 
+func waitUntilPowerPluggedIn() {
+
+	// ignore error, just use the returned true as fallback, we will just check again later
+	// if it is running on battery
+	for runningOnBattery, _ := isDeviceRunningOnBatteryPower(); runningOnBattery; runningOnBattery, _ = isDeviceRunningOnBatteryPower() {
+		numberOfSecondsToWait := 10
+		fmt.Println("Running only on battery power, waiting for", numberOfSecondsToWait, "seconds")
+		sleepForSeconds(numberOfSecondsToWait)
+	}
+
+	fmt.Println("External power is currently connected")
+
+}
+
 func isDeviceRunningOnBatteryPower() (bool, error) {
 
+	// This often returns an error shortly after being plugged in, but is fine a few seconds later
+	// and returns the correct value then
 	batteries, err := battery.GetAll()
 	if err != nil {
 		// handle error here, rest of program is happy with true as fallback for now and does
@@ -200,4 +202,18 @@ func isDeviceRunningOnBatteryPower() (bool, error) {
 	// -> device not running on battery
 	return false, nil
 
+}
+
+func sleepForSeconds(numberOfSecondsToSleep int) {
+	time.Sleep(multiplyDuration(numberOfSecondsToSleep, time.Second))
+}
+
+/*
+Hide semantically invalid duration math or seemingly unnecessary/illogical cast behind a function
+see https://stackoverflow.com/questions/17573190/how-to-multiply-duration-by-integer
+*/
+func multiplyDuration(factor int, duration time.Duration) time.Duration {
+	// converts duration to nanoseconds because multiplication only works with same types in go
+	// uses the new nanoseconds value to construct the new duration
+	return time.Duration(int64(factor) * int64(duration))
 }

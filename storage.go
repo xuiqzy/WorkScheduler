@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
-	"sync"
 
 	"github.com/google/uuid"
 
@@ -13,12 +12,19 @@ import (
 	// easy to edit (json - no spaces to be cautious of) important?
 	// use whats best as data store, as its not supposed to be looked at a lot
 	"gopkg.in/yaml.v3"
+
+	// support for locking read/write access to a file within and across processes
+	"github.com/gofrs/flock"
 )
 
-var pathToCommandStoreFile = "./commandStore.yaml"
+// Note on file locking:
+// create file locks in functions and not once, so different goroutines
+// create and have different locks
+// and thus have to wait for the other lock on the same file being released
+// Waiting for other processes also is handled by that, because file lock
+// is visible to other processes through OS mechanisms
 
-// TODO: lock with file locking to synchronize with cli adding commands to file
-var commandStoreFileLock sync.Mutex
+var pathToCommandStoreFile = "./commandStore.yaml"
 
 // CommandStore contains all commands to be executed some time
 type CommandStore struct {
@@ -46,9 +52,12 @@ const (
 
 func changeStateOfCommand(uuidOfCommandToChangeState uuid.UUID, newState CommandState) error {
 
+	var fileLockOnCommandStoreFile = flock.New(pathToCommandStoreFile)
+
 	// locking for reading, modifying and writing command store
-	commandStoreFileLock.Lock()
-	defer commandStoreFileLock.Unlock()
+	// todo handle/relay errors when locking
+	fileLockOnCommandStoreFile.Lock()
+	defer fileLockOnCommandStoreFile.Unlock()
 
 	commandStore, readError := readAndParseCommandStoreAlreadyLocked()
 
@@ -60,7 +69,7 @@ func changeStateOfCommand(uuidOfCommandToChangeState uuid.UUID, newState Command
 	// remove command with specified uuid from list
 	for index, currentCommand := range commandStore.Commands {
 		if currentCommand.UUID == uuidOfCommandToChangeState {
-			fmt.Println("Changing state of command:", currentCommand, "to state", newState)
+			//fmt.Println("Changing state of command:", currentCommand, "to state", newState)
 			commandStore.Commands[index].State = newState
 			foundCommandToChangeState = true
 			break
@@ -76,38 +85,44 @@ func changeStateOfCommand(uuidOfCommandToChangeState uuid.UUID, newState Command
 	return writeError
 }
 
-func addCommandToCommandStore(absolutePathToExecutable string, commandArguments []string) error {
+func addCommandToCommandStore(absolutePathToExecutable string, commandArguments []string) (uuid.UUID, error) {
+
+	var fileLockOnCommandStoreFile = flock.New(pathToCommandStoreFile)
 
 	// locking for reading, modifying and writing command store
-	commandStoreFileLock.Lock()
-	defer commandStoreFileLock.Unlock()
+	fileLockOnCommandStoreFile.Lock()
+	defer fileLockOnCommandStoreFile.Unlock()
 
 	commandStore, readError := readAndParseCommandStoreAlreadyLocked()
 
 	if readError != nil {
-		return readError
+		// return the Nil uuid (all 0s), because we can't return nil
+		// it is not a normally valid uuid
+		return uuid.Nil, readError
 	}
+
+	uuidOfNewCommand := uuid.New()
+
 	commandWithArguments := CommandWithArguments{
-		UUID:             uuid.New(),
+		UUID:             uuidOfNewCommand,
 		AbsolutePath:     absolutePathToExecutable,
 		CommandArguments: commandArguments,
 		State:            CommandWaitingToBeRun}
 	commandStore.Commands = append(commandStore.Commands, commandWithArguments)
 
-	// !!! this could lead to data loss if main daemon removes items from command store while this
-	// part in another process reads und later writes to the command store
-
 	writeError := marshalAndWriteCommandStore(commandStore)
 
-	// is nil on success
-	return writeError
+	// writeError is nil on success
+	return uuidOfNewCommand, writeError
 }
 
 func removeCommandFromCommandStore(uuidOfCommandToRemove uuid.UUID) error {
 
+	var fileLockOnCommandStoreFile = flock.New(pathToCommandStoreFile)
+
 	// locking for reading, modifying and writing command store
-	commandStoreFileLock.Lock()
-	defer commandStoreFileLock.Unlock()
+	fileLockOnCommandStoreFile.Lock()
+	defer fileLockOnCommandStoreFile.Unlock()
 
 	commandStore, readError := readAndParseCommandStoreAlreadyLocked()
 
@@ -119,7 +134,7 @@ func removeCommandFromCommandStore(uuidOfCommandToRemove uuid.UUID) error {
 	// remove command with specified uuid from list
 	for index, currentCommand := range commandStore.Commands {
 		if currentCommand.UUID == uuidOfCommandToRemove {
-			fmt.Println("Removing command:", currentCommand)
+			//fmt.Println("Removing command:", currentCommand)
 			// overwrite current element with last element of list
 			commandStore.Commands[index] = commandStore.Commands[len(commandStore.Commands)-1]
 			// take list without the last element
@@ -153,8 +168,10 @@ func readAndParseCommandStore() (CommandStore, error) {
 
 func readAndParseCommandStoreFromFile(pathToCommandStoreFile string, alreadyLocked bool) (CommandStore, error) {
 
+	var fileLockOnCommandStoreFile = flock.New(pathToCommandStoreFile)
+
 	if !alreadyLocked {
-		commandStoreFileLock.Lock()
+		fileLockOnCommandStoreFile.Lock()
 	}
 
 	commandStore := CommandStore{}
@@ -163,7 +180,7 @@ func readAndParseCommandStoreFromFile(pathToCommandStoreFile string, alreadyLock
 		return commandStore, readingError
 	}
 	if !alreadyLocked {
-		commandStoreFileLock.Unlock()
+		fileLockOnCommandStoreFile.Unlock()
 	}
 
 	unmarshalError := yaml.Unmarshal(yamlFile, &commandStore)
@@ -174,6 +191,8 @@ func readAndParseCommandStoreFromFile(pathToCommandStoreFile string, alreadyLock
 	return commandStore, nil
 }
 
+// never called directly from scheduling logic, only through add command and change command functions
+// so the command store file is already locked
 func marshalAndWriteCommandStore(commandStore CommandStore) error {
 	return marshalAndWriteCommandStoreToFile(pathToCommandStoreFile, commandStore)
 }
