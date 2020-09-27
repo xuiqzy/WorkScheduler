@@ -1,17 +1,12 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"os"
 
 	"github.com/google/uuid"
-
-	// consider toml, json or json with comments like json5 or disabling some dangerous yaml features
-	// in the parser like anchors that make xml bomb like attacks possible
-	// easy to edit (json - no spaces to be cautious of) important?
-	// use whats best as data store, as its not supposed to be looked at a lot
-	"gopkg.in/yaml.v3"
 
 	// support for locking read/write access to a file within and across processes
 	"github.com/gofrs/flock"
@@ -24,7 +19,7 @@ import (
 // Waiting for other processes also is handled by that, because file lock
 // is visible to other processes through OS mechanisms
 
-var pathToCommandStoreFile = "./commandStore.yaml"
+var pathToCommandStoreFile = "./commandStore.json"
 
 // CommandStore contains all commands to be executed some time
 type CommandStore struct {
@@ -35,7 +30,7 @@ type CommandStore struct {
 type CommandWithArguments struct {
 	UUID             uuid.UUID
 	AbsolutePath     string
-	CommandArguments []string `yaml:",flow"`
+	CommandArguments []string
 	State            CommandState
 }
 
@@ -175,7 +170,8 @@ func readAndParseCommandStoreFromFile(pathToCommandStoreFile string, alreadyLock
 	}
 
 	commandStore := CommandStore{}
-	yamlFile, readingError := ioutil.ReadFile(pathToCommandStoreFile)
+	// empty file is created by this, if it does not exist
+	marshalledJSONData, readingError := ioutil.ReadFile(pathToCommandStoreFile)
 	if readingError != nil {
 		return commandStore, readingError
 	}
@@ -183,7 +179,13 @@ func readAndParseCommandStoreFromFile(pathToCommandStoreFile string, alreadyLock
 		fileLockOnCommandStoreFile.Unlock()
 	}
 
-	unmarshalError := yaml.Unmarshal(yamlFile, &commandStore)
+	// Empty file is not valid json, so just return empty command store here before trying to unmarshal.
+	// A write to the command store will create valid json in the future.
+	if len(marshalledJSONData) == 0 {
+		return commandStore, readingError
+	}
+
+	unmarshalError := json.Unmarshal(marshalledJSONData, &commandStore)
 	if unmarshalError != nil {
 		return commandStore, unmarshalError
 	}
@@ -199,7 +201,8 @@ func marshalAndWriteCommandStore(commandStore CommandStore) error {
 
 func marshalAndWriteCommandStoreToFile(pathToCommandStoreFile string, commandStore CommandStore) error {
 
-	marshalledData, marshalError := yaml.Marshal(&commandStore)
+	// prefix new lines with nothing, indent with tabs
+	marshalledJSONData, marshalError := json.MarshalIndent(&commandStore, "", "\t")
 
 	if marshalError != nil {
 		return marshalError
@@ -213,7 +216,7 @@ func marshalAndWriteCommandStoreToFile(pathToCommandStoreFile string, commandSto
 	var permissionsForNewFileBeforeUmask os.FileMode = 0600
 
 	// when overwriting file, permissions are not changed
-	writeError := ioutil.WriteFile(pathToCommandStoreFile, marshalledData, permissionsForNewFileBeforeUmask)
+	writeError := ioutil.WriteFile(pathToCommandStoreFile, marshalledJSONData, permissionsForNewFileBeforeUmask)
 	if writeError != nil {
 		return writeError
 	}
