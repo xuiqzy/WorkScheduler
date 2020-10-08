@@ -63,7 +63,8 @@ func daemonMainLoop() {
 			fmt.Println("Error when reading command store:", err)
 			fmt.Println("Trying again later (only when also plugged into external power).")
 			amountSeconds := 5
-			fmt.Println("Sleeping for", amountSeconds, "seconds...\n")
+			fmt.Println("Sleeping for", amountSeconds, "seconds...")
+			fmt.Println()
 			sleepForSeconds(amountSeconds)
 			continue
 		}
@@ -108,7 +109,8 @@ func daemonMainLoop() {
 		// we ran all commands asynchronously (if any), wait a bit before checking again
 		// for new commands to be scheduled (even if we are still plugged into power)
 		secondsToSleep := 30
-		fmt.Println("Sleeping for", secondsToSleep, "seconds...\n")
+		fmt.Println("Sleeping for", secondsToSleep, "seconds...")
+		fmt.Println()
 		sleepForSeconds(secondsToSleep)
 
 	}
