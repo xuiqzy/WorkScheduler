@@ -1,10 +1,13 @@
 package main
 
+// This is the persistant storage of program state such as which commands were executed when
+
 import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"os"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -26,12 +29,17 @@ type CommandStore struct {
 	Commands []CommandWithArguments
 }
 
+// TODO remove all uuid usages, cause it was replaced with name as unique identifier for now
+
 // CommandWithArguments is a full path to a command with all arguments to it, in whole representing what should be executed
 type CommandWithArguments struct {
-	UUID             uuid.UUID
-	AbsolutePath     string
-	CommandArguments []string
-	State            CommandState
+	Name                string
+	UUID                uuid.UUID
+	AbsolutePath        string
+	CommandArguments    []string
+	State               CommandState
+	DurationBetweenRuns time.Duration
+	LastRun             time.Time
 }
 
 // CommandState is one of the states for a command to be in, this will be saved to disk, too
@@ -66,6 +74,11 @@ func changeStateOfCommand(uuidOfCommandToChangeState uuid.UUID, newState Command
 		if currentCommand.UUID == uuidOfCommandToChangeState {
 			//fmt.Println("Changing state of command:", currentCommand, "to state", newState)
 			commandStore.Commands[index].State = newState
+
+			if newState == CommandSuccessful {
+				commandStore.Commands[index].LastRun = time.Now()
+			}
+
 			foundCommandToChangeState = true
 			break
 		}
@@ -80,7 +93,9 @@ func changeStateOfCommand(uuidOfCommandToChangeState uuid.UUID, newState Command
 	return writeError
 }
 
-func addCommandToCommandStore(absolutePathToExecutable string, commandArguments []string) (uuid.UUID, error) {
+func addCommandToCommandStore(absolutePathToExecutable string, commandArguments []string, durationBetweenExecutions time.Duration, uniqueCommandName string) (bool, error) {
+
+	hasUpdatedCommandInCommandStore := false
 
 	var fileLockOnCommandStoreFile = flock.New(pathToCommandStoreFile)
 
@@ -91,26 +106,73 @@ func addCommandToCommandStore(absolutePathToExecutable string, commandArguments 
 	commandStore, readError := readAndParseCommandStoreAlreadyLocked()
 
 	if readError != nil {
-		// return the Nil uuid (all 0s), because we can't return nil
-		// it is not a normally valid uuid
-		return uuid.Nil, readError
+		return hasUpdatedCommandInCommandStore, readError
 	}
 
 	uuidOfNewCommand := uuid.New()
 
-	commandWithArguments := CommandWithArguments{
-		UUID:             uuidOfNewCommand,
-		AbsolutePath:     absolutePathToExecutable,
-		CommandArguments: commandArguments,
-		State:            CommandWaitingToBeRun}
-	commandStore.Commands = append(commandStore.Commands, commandWithArguments)
+	newCommandWithArguments := CommandWithArguments{
+		Name:                uniqueCommandName,
+		UUID:                uuidOfNewCommand,
+		AbsolutePath:        absolutePathToExecutable,
+		CommandArguments:    commandArguments,
+		State:               CommandWaitingToBeRun,
+		DurationBetweenRuns: durationBetweenExecutions,
+		// zero value of time indicates was never run before, year 1 is unlikely to come up otherwise
+		LastRun: time.Time{},
+	}
+
+	// check if command with same name was already in command store
+	// That could be from last run or was added by other config file already
+	// Just update its contents in both cases and report it was updated, not added
+	for index, currentCommand := range commandStore.Commands {
+
+		if currentCommand.Name == newCommandWithArguments.Name {
+			// overwrite values that can be specified in config
+			updatedCommand := updateContentsOfCommand(currentCommand, newCommandWithArguments)
+			fmt.Println("Updated command:", updatedCommand)
+			commandStore.Commands[index] = updatedCommand
+			hasUpdatedCommandInCommandStore = true
+			break
+		}
+	}
+
+	// if the command is new, we need to append it, otherwise, it was already updated
+	if !hasUpdatedCommandInCommandStore {
+		commandStore.Commands = append(commandStore.Commands, newCommandWithArguments)
+	}
 
 	writeError := marshalAndWriteCommandStore(commandStore)
 
 	// writeError is nil on success
-	return uuidOfNewCommand, writeError
+	return hasUpdatedCommandInCommandStore, writeError
 }
 
+// update absolute path, command arguments and duration between runs of a CommandWithArguments
+func updateContentsOfCommand(oldCommand CommandWithArguments, newCommandFromConfig CommandWithArguments) CommandWithArguments {
+
+	// make real copy of struct values to keep in order to not influence values passed into this function
+
+	newCommandArguments := make([]string, len(oldCommand.CommandArguments))
+	copy(oldCommand.CommandArguments, newCommandArguments)
+
+	updatedCommand := CommandWithArguments{
+		// name should always be the same in new command anyway
+		Name:                oldCommand.Name,
+		UUID:                oldCommand.UUID,
+		AbsolutePath:        newCommandFromConfig.AbsolutePath,
+		CommandArguments:    newCommandArguments,
+		State:               oldCommand.State,
+		DurationBetweenRuns: time.Duration(newCommandFromConfig.DurationBetweenRuns.Nanoseconds()),
+		// LastRun should stay from the old value in case it was already run, the new value can only
+		// come from a config and is therefore always empty
+		LastRun: oldCommand.LastRun,
+	}
+
+	return updatedCommand
+}
+
+// not needed anymore if all uuid code is removed
 func removeCommandFromCommandStore(uuidOfCommandToRemove uuid.UUID) error {
 
 	var fileLockOnCommandStoreFile = flock.New(pathToCommandStoreFile)
@@ -140,6 +202,42 @@ func removeCommandFromCommandStore(uuidOfCommandToRemove uuid.UUID) error {
 	}
 	if !foundCommandToRemove {
 		return fmt.Errorf("UUID %v of command to remove not found", uuidOfCommandToRemove)
+	}
+
+	writeError := marshalAndWriteCommandStore(commandStore)
+
+	// is nil on success
+	return writeError
+}
+
+func removeCommandFromCommandStoreByName(commandNameToRemove string) error {
+	var fileLockOnCommandStoreFile = flock.New(pathToCommandStoreFile)
+
+	// locking for reading, modifying and writing command store
+	fileLockOnCommandStoreFile.Lock()
+	defer fileLockOnCommandStoreFile.Unlock()
+
+	commandStore, readError := readAndParseCommandStoreAlreadyLocked()
+
+	if readError != nil {
+		return readError
+	}
+
+	foundCommandToRemove := false
+	// remove command with specified name from list
+	for index, currentCommand := range commandStore.Commands {
+		if currentCommand.Name == commandNameToRemove {
+			//fmt.Println("Removing command:", currentCommand)
+			// overwrite current element with last element of list
+			commandStore.Commands[index] = commandStore.Commands[len(commandStore.Commands)-1]
+			// take list without the last element
+			commandStore.Commands = commandStore.Commands[:len(commandStore.Commands)-1]
+			foundCommandToRemove = true
+			break
+		}
+	}
+	if !foundCommandToRemove {
+		return fmt.Errorf("Name %v of command to remove not found", commandNameToRemove)
 	}
 
 	writeError := marshalAndWriteCommandStore(commandStore)
@@ -194,7 +292,7 @@ func readAndParseCommandStoreFromFile(pathToCommandStoreFile string, alreadyLock
 }
 
 // never called directly from scheduling logic, only through add command and change command functions
-// so the command store file is already locked
+// so the command store file will be already locked
 func marshalAndWriteCommandStore(commandStore CommandStore) error {
 	return marshalAndWriteCommandStoreToFile(pathToCommandStoreFile, commandStore)
 }

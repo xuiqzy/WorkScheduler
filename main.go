@@ -7,9 +7,11 @@ import (
 	"time"
 
 	"github.com/distatus/battery"
+	"github.com/google/uuid"
 )
 
 func main() {
+	fmt.Println("Started WorkScheduler :)")
 
 	numberOfCommandLineArguments := len(os.Args)
 	// first argument is the path to this program itself, so more than 1 argument means user passed some command as argument
@@ -36,7 +38,7 @@ func main() {
 		}
 		fmt.Println()
 
-		newUUID, err := addCommandToCommandStore(commandToExecuteAbsolutePath, commandArguments)
+		newUUID, err := addCommandToCommandStore(commandToExecuteAbsolutePath, commandArguments, 999999999*time.Second, uuid.New().String())
 		if err != nil {
 			fmt.Println("Error when adding command to command store for later execution:", err)
 		} else {
@@ -45,19 +47,21 @@ func main() {
 		}
 
 	} else {
-		daemonMainLoop()
+		runDaemonMode()
 	}
 
 }
 
-func daemonMainLoop() {
+func runDaemonMode() {
 	fmt.Println("No command to add to scheduled commands specified, running in daemon mode and executing stored commands when appropriate")
+
+	parseAllConfigFiles()
 
 	for {
 
 		waitUntilPowerPluggedIn()
 
-		fmt.Println("Checking command store for comands to be run...")
+		fmt.Println("Checking command store for commands to be run...")
 		commandStore, err := readAndParseCommandStore()
 		if err != nil {
 			fmt.Println("Error when reading command store:", err)
@@ -80,9 +84,7 @@ func daemonMainLoop() {
 				break
 			}
 
-			// todo: handle failed commands
-			if currentCommand.State != CommandWaitingToBeRun {
-				// don't start a command that is already running
+			if !shouldCommandBeRun(currentCommand) {
 				continue
 			}
 
@@ -94,10 +96,6 @@ func daemonMainLoop() {
 			// respective current command and does not share one reference
 			go func(commandToRun CommandWithArguments) {
 				runRawCommandAndHandleErrors(commandToRun)
-				err := removeCommandFromCommandStore(commandToRun.UUID)
-				if err != nil {
-					fmt.Println("Error when removing command:", commandToRun)
-				}
 			}(currentCommand)
 
 		}
@@ -108,12 +106,30 @@ func daemonMainLoop() {
 
 		// we ran all commands asynchronously (if any), wait a bit before checking again
 		// for new commands to be scheduled (even if we are still plugged into power)
-		secondsToSleep := 30
+		secondsToSleep := 10
 		fmt.Println("Sleeping for", secondsToSleep, "seconds...")
 		fmt.Println()
 		sleepForSeconds(secondsToSleep)
 
 	}
+}
+
+func shouldCommandBeRun(command CommandWithArguments) bool {
+	if command.State == CommandRunning {
+		return false
+	}
+
+	// TODO: handle command failed state
+
+	// command was never run before
+	if command.LastRun.IsZero() {
+		return true
+	}
+
+	if time.Now().Sub(command.LastRun) > command.DurationBetweenRuns {
+		return true
+	}
+	return false
 }
 
 func runRawCommandAndHandleErrors(commandToRun CommandWithArguments) error {
@@ -204,18 +220,4 @@ func isDeviceRunningOnBatteryPower() (bool, error) {
 	// -> device not running on battery
 	return false, nil
 
-}
-
-func sleepForSeconds(numberOfSecondsToSleep int) {
-	time.Sleep(multiplyDuration(numberOfSecondsToSleep, time.Second))
-}
-
-/*
-Hide semantically invalid duration math or seemingly unnecessary/illogical cast behind a function
-see https://stackoverflow.com/questions/17573190/how-to-multiply-duration-by-integer
-*/
-func multiplyDuration(factor int, duration time.Duration) time.Duration {
-	// converts duration to nanoseconds because multiplication only works with same types in go
-	// uses the new nanoseconds value to construct the new duration
-	return time.Duration(int64(factor) * int64(duration))
 }
